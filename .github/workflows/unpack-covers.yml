@@ -3,7 +3,7 @@ name: Unpack library covers
 on:
   push:
     paths:
-      - covers.zip
+      - '*.zip'
 
 permissions:
   contents: write
@@ -17,9 +17,11 @@ jobs:
 
       - name: Unpack cover images
         run: |
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name '*.zip' | head -n 1)"
+          test -n "$ZIP_FILE"
           rm -rf covers
           mkdir -p covers
-          unzip -o covers.zip -d covers
+          unzip -o "$ZIP_FILE" -d covers
           find covers -type f -name '*.jpg' -print
 
       - name: Commit extracted covers
