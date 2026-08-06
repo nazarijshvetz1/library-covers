@@ -6,8 +6,12 @@
 const COVER_AUTOMATION = Object.freeze({
   spreadsheetId: '18SEyo-tAJ8uHoAFMrYbiaGMtmXjhiscQGcYTpJrNtEI',
   sheetName: 'Матеріали',
+  coverSheetName: 'Обкладинки',
+  masterHeaderRow: 1,
   headerRow: 3,
   firstInputRow: 4,
+  newBookLastInputRow: 20,
+  maxSelectedBatchSize: 10,
   defaultOwner: 'nazarijshvetz1',
   defaultRepo: 'library-covers',
   rawPrefix: 'https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/',
@@ -78,6 +82,7 @@ function setupCoverAutomation() {
 
   configureCoverAutomation();
   installCoverAutomationTriggers();
+  addCoverAutomationMenu_();
   return columns;
 }
 
@@ -97,6 +102,10 @@ function configureCoverAutomation() {
 /** Installs exactly one owned trigger of each required type. */
 function installCoverAutomationTriggers() {
   removeCoverAutomationTriggers();
+  ScriptApp.newTrigger('onOpenCoverAutomation')
+    .forSpreadsheet(COVER_AUTOMATION.spreadsheetId)
+    .onOpen()
+    .create();
   ScriptApp.newTrigger('onEditCoverAutomation')
     .forSpreadsheet(COVER_AUTOMATION.spreadsheetId)
     .onEdit()
@@ -110,12 +119,31 @@ function installCoverAutomationTriggers() {
 
 /** Removes only cover automation triggers owned by the current user. */
 function removeCoverAutomationTriggers() {
-  const handlers = new Set(['onEditCoverAutomation', 'checkPendingCoverRequests']);
+  const handlers = new Set([
+    'onOpenCoverAutomation',
+    'onEditCoverAutomation',
+    'checkPendingCoverRequests',
+  ]);
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (handlers.has(trigger.getHandlerFunction())) {
       ScriptApp.deleteTrigger(trigger);
     }
   });
+}
+
+
+/** Adds a separate menu without replacing any existing onOpen function. */
+function onOpenCoverAutomation() {
+  addCoverAutomationMenu_();
+}
+
+
+function addCoverAutomationMenu_() {
+  SpreadsheetApp.getUi()
+    .createMenu('Обкладинки')
+    .addItem('Знайти для виділених матеріалів', 'queueSelectedExistingCoverPreviews')
+    .addItem('Зберегти виділені обкладинки', 'commitSelectedExistingCovers')
+    .addToUi();
 }
 
 
@@ -185,6 +213,126 @@ function handleCoverConfirmation_(sheet, row, columns) {
 }
 
 
+/**
+ * Sends preview requests for selected existing material rows.
+ * The visible source field wins; otherwise the current "Електронна версія"
+ * URL is used as the publication-page source. At most ten rows are accepted.
+ */
+function queueSelectedExistingCoverPreviews() {
+  const sheet = getCoverSheet_();
+  const columns = findCoverColumns_(sheet);
+  const rows = getSelectedExistingMaterialRows_(sheet);
+  const masterHeaders = getHeaderMap_(sheet, COVER_AUTOMATION.masterHeaderRow);
+  const catColumn = masterHeaders['ID матеріалу'];
+  const fallbackSourceColumn = masterHeaders['Електронна версія'];
+  const coverFlagColumn = masterHeaders['Обкладинка'];
+  if (!catColumn || !fallbackSourceColumn || !coverFlagColumn) {
+    throw new Error('Не знайдено службові колонки основної таблиці матеріалів');
+  }
+
+  const summary = { submitted: 0, skipped: 0, messages: [] };
+  rows.forEach(function (row) {
+    const catId = String(sheet.getRange(row, catColumn).getDisplayValue()).trim();
+    const coverFlag = String(sheet.getRange(row, coverFlagColumn).getDisplayValue()).trim();
+    const visibleSource = String(
+      sheet.getRange(row, columns['Джерело обкладинки']).getDisplayValue()
+    ).trim();
+    const fallbackSource = String(
+      sheet.getRange(row, fallbackSourceColumn).getDisplayValue()
+    ).trim();
+    const source = chooseExistingCoverSource_(visibleSource, fallbackSource);
+
+    if (!isValidCatId_(catId)) {
+      summary.skipped += 1;
+      summary.messages.push('Рядок ' + row + ': неправильний CAT-ID');
+      return;
+    }
+    if (coverFlag === 'Так') {
+      summary.skipped += 1;
+      summary.messages.push(catId + ': обкладинка вже позначена як наявна');
+      return;
+    }
+    if (!source) {
+      summary.skipped += 1;
+      summary.messages.push(catId + ': немає доступного URL');
+      return;
+    }
+
+    prepareExistingCoverRow_(sheet, row, columns, catId, source);
+    if (submitCoverRequest(row, 'preview', false)) summary.submitted += 1;
+  });
+  showExistingCoverBatchSummary_('Пошук обкладинок', summary);
+  return summary;
+}
+
+
+/** Commits only selected rows whose preview has already completed. */
+function commitSelectedExistingCovers() {
+  const sheet = getCoverSheet_();
+  const columns = findCoverColumns_(sheet);
+  const rows = getSelectedExistingMaterialRows_(sheet);
+  const summary = { submitted: 0, skipped: 0, messages: [] };
+
+  rows.forEach(function (row) {
+    const catId = String(sheet.getRange(row, columns['CAT-ID обкладинки']).getDisplayValue()).trim();
+    const phase = String(sheet.getRange(row, columns['Фаза обкладинки']).getDisplayValue()).trim();
+    if (!isValidCatId_(catId) || phase !== 'preview_done') {
+      summary.skipped += 1;
+      summary.messages.push('Рядок ' + row + ': preview ще не готовий');
+      return;
+    }
+    if (submitCoverRequest(row, 'commit', false)) summary.submitted += 1;
+  });
+  showExistingCoverBatchSummary_('Збереження обкладинок', summary);
+  return summary;
+}
+
+
+function getSelectedExistingMaterialRows_(sheet) {
+  const activeSpreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const activeSheet = activeSpreadsheet && activeSpreadsheet.getActiveSheet();
+  const range = activeSheet && activeSheet.getActiveRange();
+  if (!range || activeSheet.getSheetId() !== sheet.getSheetId()) {
+    throw new Error('Спочатку виділіть рядки на аркуші «Матеріали»');
+  }
+  const startRow = Math.max(range.getRow(), COVER_AUTOMATION.firstInputRow);
+  const endRow = range.getLastRow();
+  if (endRow < startRow) throw new Error('У виділенні немає рядків матеріалів');
+  const count = endRow - startRow + 1;
+  if (count > COVER_AUTOMATION.maxSelectedBatchSize) {
+    throw new Error('За один запуск можна обробити не більше 10 рядків');
+  }
+  return Array.from({ length: count }, function (_, index) { return startRow + index; });
+}
+
+
+function prepareExistingCoverRow_(sheet, row, columns, catId, source) {
+  sheet.getRange(row, columns['Джерело обкладинки']).setValue(source);
+  sheet.getRange(row, columns['Підтвердити обкладинку']).setValue(false);
+  clearCoverCells_(sheet, row, columns, [
+    'Статус обкладинки',
+    'CAT-ID обкладинки',
+    'Request ID обкладинки',
+    'Знайдене зображення',
+    'Фаза обкладинки',
+    'Оновлено обкладинку',
+  ]);
+  sheet.getRange(row, columns['CAT-ID обкладинки']).setValue(catId);
+}
+
+
+function showExistingCoverBatchSummary_(title, summary) {
+  const details = summary.messages.slice(0, 5);
+  const suffix = summary.messages.length > details.length
+    ? '\n…ще ' + (summary.messages.length - details.length)
+    : '';
+  SpreadsheetApp.getUi().alert(
+    title + ': надіслано ' + summary.submitted + ', пропущено ' + summary.skipped +
+    (details.length ? '\n\n' + details.join('\n') + suffix : '')
+  );
+}
+
+
 /** Submits a preview or commit request to GitHub Actions. */
 function submitCoverRequest(row, mode, overwrite) {
   mode = mode || 'commit';
@@ -251,13 +399,24 @@ function submitCoverRequest(row, mode, overwrite) {
 /** Resolves the final CAT-ID by normalized ISBN in the master material table. */
 function resolveCatId(row) {
   const sheet = getCoverSheet_();
+  const columns = findCoverColumns_(sheet);
+  const explicitCatId = columns
+    ? String(sheet.getRange(row, columns['CAT-ID обкладинки']).getDisplayValue()).trim()
+    : '';
+  const masterHeaders = getHeaderMap_(sheet, COVER_AUTOMATION.masterHeaderRow);
+  const masterCatColumn = masterHeaders['ID матеріалу'];
+  const directCatId = row > COVER_AUTOMATION.newBookLastInputRow && masterCatColumn
+    ? String(sheet.getRange(row, masterCatColumn).getDisplayValue()).trim()
+    : '';
+  const earlyCatId = chooseResolvedCatId_(explicitCatId, directCatId, '', true);
+  if (earlyCatId) return earlyCatId;
+
   const inputHeaders = getHeaderMap_(sheet, COVER_AUTOMATION.headerRow);
   const isbnInputColumn = inputHeaders['ISBN нормалізований'];
   if (!isbnInputColumn) return '';
   const isbn = normalizeIsbn_(sheet.getRange(row, isbnInputColumn).getDisplayValue());
   if (!isbn) return '';
 
-  const masterHeaders = getHeaderMap_(sheet, 1);
   const masterIsbnColumn = masterHeaders['ISBN нормалізований'];
   if (!masterIsbnColumn) return '';
   const match = sheet
@@ -268,7 +427,7 @@ function resolveCatId(row) {
     .findNext();
   if (!match) return '';
   const catId = String(sheet.getRange(match.getRow(), 1).getDisplayValue()).trim();
-  return /^CAT-\d{4,}$/.test(catId) ? catId : '';
+  return chooseResolvedCatId_('', '', catId, false);
 }
 
 
@@ -344,6 +503,7 @@ function updateCoverResult(row, result) {
       if (!finalUrlColumn) throw new Error('Не знайдено колонку «Обкладинка (URL)»');
       sheet.getRange(row, finalUrlColumn).setValue(result.final_url);
       sheet.getRange(row, columns['Знайдене зображення']).setValue(result.image_source_url || '');
+      applyFinalCoverToCatalog_(expectedCatId, result.final_url);
       sheet.getRange(row, columns['Підтвердити обкладинку']).setValue(false);
       sheet.getRange(row, columns['Фаза обкладинки']).setValue('done');
       sheet.getRange(row, columns['Оновлено обкладинку']).setValue(new Date());
@@ -524,6 +684,66 @@ function normalizeIsbn_(value) {
 }
 
 
+function isValidCatId_(value) {
+  return /^CAT-\d{4,}$/.test(String(value || '').trim());
+}
+
+
+/** Pure helper used by both the existing-row and ISBN workflows. */
+function chooseResolvedCatId_(explicitCatId, directCatId, isbnCatId, allowDirect) {
+  if (isValidCatId_(explicitCatId)) return String(explicitCatId).trim();
+  if (allowDirect && isValidCatId_(directCatId)) return String(directCatId).trim();
+  return isValidCatId_(isbnCatId) ? String(isbnCatId).trim() : '';
+}
+
+
+function chooseExistingCoverSource_(visibleSource, fallbackSource) {
+  const preferred = String(visibleSource || '').trim();
+  const fallback = String(fallbackSource || '').trim();
+  if (/^https?:\/\//i.test(preferred)) return preferred;
+  return /^https?:\/\//i.test(fallback) ? fallback : '';
+}
+
+
+/** Updates the master flag and the exact row used by every catalog/revision image lookup. */
+function applyFinalCoverToCatalog_(catId, finalUrl) {
+  if (!isValidCatId_(catId)) return false;
+  if (finalUrl !== COVER_AUTOMATION.rawPrefix + catId + '.jpg') return false;
+
+  const spreadsheet = SpreadsheetApp.openById(COVER_AUTOMATION.spreadsheetId);
+  const materialSheet = spreadsheet.getSheetByName(COVER_AUTOMATION.sheetName);
+  const masterHeaders = getHeaderMap_(materialSheet, COVER_AUTOMATION.masterHeaderRow);
+  const catColumn = masterHeaders['ID матеріалу'];
+  const coverFlagColumn = masterHeaders['Обкладинка'];
+  if (catColumn && coverFlagColumn) {
+    const materialMatch = materialSheet
+      .getRange(2, catColumn, Math.max(1, materialSheet.getMaxRows() - 1), 1)
+      .createTextFinder(catId)
+      .matchEntireCell(true)
+      .matchCase(true)
+      .findNext();
+    if (materialMatch) materialSheet.getRange(materialMatch.getRow(), coverFlagColumn).setValue('Так');
+  }
+
+  const coverSheet = spreadsheet.getSheetByName(COVER_AUTOMATION.coverSheetName);
+  if (!coverSheet) return false;
+  const coverMatch = coverSheet
+    .getRange(2, 1, Math.max(1, coverSheet.getMaxRows() - 1), 1)
+    .createTextFinder(catId)
+    .matchEntireCell(true)
+    .matchCase(true)
+    .findNext();
+  if (!coverMatch) return false;
+
+  const coverRow = coverMatch.getRow();
+  coverSheet.getRange(coverRow, 2).setFormula(
+    '=IF(A' + coverRow + '="";"";IFERROR(IMAGE("' + finalUrl + '");"Фото відсутнє"))'
+  );
+  coverSheet.getRange(coverRow, 3).setValue(finalUrl);
+  return true;
+}
+
+
 function setCoverStatus_(sheet, row, columns, status) {
   sheet.getRange(row, columns['Статус обкладинки']).setValue(status || '');
 }
@@ -550,3 +770,4 @@ function mapCoverErrorStatus_(status) {
   };
   return map[status] || statuses.uploadError;
 }
+
