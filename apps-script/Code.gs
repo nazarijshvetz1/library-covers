@@ -60,10 +60,10 @@ function setupCoverAutomation() {
     .setDataValidation(checkboxRule);
 
   const previewFormula = [
-    '=IF(RC[-1]="","",',
-    'IF(RC[5]<>"",IFERROR(IMAGE(RC[5]),"Зображення недоступне"),',
-    'IF(REGEXMATCH(LOWER(RC[-1]),"\\.(jpe?g|png|webp)(\\?.*)?$"),',
-    'IFERROR(IMAGE(RC[-1]),"Зображення недоступне"),"Пошук зображення…")))',
+    '=IF(RC[-1]="";"";',
+    'IF(RC[5]<>"";IFERROR(IMAGE(RC[5]);"Зображення недоступне");',
+    'IF(REGEXMATCH(LOWER(RC[-1]);"\\.(jpe?g|png|webp)(\\?.*)?$");',
+    'IFERROR(IMAGE(RC[-1]);"Зображення недоступне");"Пошук зображення…")))',
   ].join('');
   sheet
     .getRange(COVER_AUTOMATION.firstInputRow, previewColumn, rowCount, 1)
