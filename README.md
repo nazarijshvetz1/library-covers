@@ -1,0 +1,55 @@
+# Library covers
+
+Сховище обкладинок бібліотечних матеріалів для Google-таблиці
+«Єдина службова база початкової школи».
+
+## Формат файлів
+
+- папка: `covers/`;
+- назва: `CAT-XXXX.jpg`;
+- формат: справжній JPEG;
+- максимальний розмір після обробки: 600 × 900;
+- JPEG quality: 82, progressive та optimized.
+
+Постійний URL має вигляд:
+
+```text
+https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-0112.jpg
+```
+
+## Автоматичне додавання обкладинки
+
+1. У блоці додавання книги на аркуші «Матеріали» користувач вставляє URL у
+   «Джерело обкладинки».
+2. Google Apps Script надсилає preview-запит через `repository_dispatch`.
+3. GitHub Action безпечно завантажує пряме зображення або шукає його на
+   HTML-сторінці через `og:image`, `twitter:image`, `image_src` чи JSON-LD.
+4. Користувач перевіряє preview і встановлює checkbox.
+5. Після появи `CAT-ID` Action створює `covers/<CAT-ID>.jpg`.
+6. Apps Script отримує результат із `cover-status/requests/<request_id>.json`
+   та записує постійний raw GitHub URL у чинну колонку «Обкладинка (URL)».
+
+Старі workflow `unpack-covers.yml`, `import-base64-cover.yml` та
+`optimize-covers.yml` залишаються незалежними й не змінюються.
+
+## Розробка і тести
+
+```bash
+python -m pip install -r scripts/requirements.txt
+python -m pytest -q
+node tests/test_apps_script_logic.mjs
+```
+
+Локальна перевірка без запису в `covers/`:
+
+```bash
+python scripts/import_cover.py \
+  --cat-id CAT-0114 \
+  --source-url https://example.com/cover.jpg \
+  --request-id 11111111-1111-4111-8111-111111111111 \
+  --mode commit \
+  --dry-run true
+```
+
+Докладне налаштування українською:
+[docs/COVER_AUTOMATION_SETUP_UK.md](docs/COVER_AUTOMATION_SETUP_UK.md).
