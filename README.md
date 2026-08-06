@@ -21,13 +21,19 @@ https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-
 
 1. У блоці додавання книги на аркуші «Матеріали» користувач вставляє URL у
    «Джерело обкладинки».
-2. Google Apps Script надсилає preview-запит через `repository_dispatch`.
-3. GitHub Action безпечно завантажує пряме зображення або шукає його на
-   HTML-сторінці через `og:image`, `twitter:image`, `image_src` чи JSON-LD.
+2. Google Apps Script напряму завантажує сторінку або зображення й шукає
+   `og:image`, `twitter:image`, `image_src` чи JSON-LD.
+3. Прямий режим не залежить від GitHub Actions і послідовно використовує
+   GitHub Contents API.
 4. Користувач перевіряє preview і встановлює checkbox.
-5. Після появи `CAT-ID` Action створює `covers/<CAT-ID>.jpg`.
-6. Apps Script отримує результат із `cover-status/requests/<request_id>.json`
-   та записує постійний raw GitHub URL у чинну колонку «Обкладинка (URL)».
+5. Після появи `CAT-ID` Apps Script конвертує BMP/GIF/JPEG/PNG у JPEG і
+   створює `covers/<CAT-ID>.jpg`.
+6. Apps Script одразу записує постійний raw GitHub URL у чинну колонку
+   «Обкладинка (URL)».
+
+Старий `repository_dispatch`/status JSON шлях збережено як резервний режим
+`COVER_PROCESSING_MODE=actions`. Прямий режим не встановлює точні 600×900
+і quality 82; `optimize-covers.yml` залишається окремим додатковим проходом.
 
 Старі workflow `unpack-covers.yml`, `import-base64-cover.yml` та
 `optimize-covers.yml` залишаються незалежними й не змінюються.
@@ -53,3 +59,4 @@ python scripts/import_cover.py \
 
 Докладне налаштування українською:
 [docs/COVER_AUTOMATION_SETUP_UK.md](docs/COVER_AUTOMATION_SETUP_UK.md).
+
