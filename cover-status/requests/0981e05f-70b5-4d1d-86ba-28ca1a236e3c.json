@@ -1,0 +1,12 @@
+{
+  "cat_id": "",
+  "request_id": "0981e05f-70b5-4d1d-86ba-28ca1a236e3c",
+  "success": true,
+  "status": "preview_ready",
+  "message": "Обкладинку знайдено — перевірте та підтвердьте",
+  "source_url": "https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-0001.jpg",
+  "updated_at": "2026-08-06T11:05:31.575313Z",
+  "mode": "preview",
+  "dry_run": false,
+  "image_source_url": "https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-0001.jpg"
+}
