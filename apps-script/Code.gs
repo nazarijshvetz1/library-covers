@@ -11,7 +11,12 @@ const COVER_AUTOMATION = Object.freeze({
   headerRow: 3,
   firstInputRow: 4,
   newBookLastInputRow: 20,
-  maxSelectedBatchSize: 10,
+  maxSelectedBatchSize: 5,
+  defaultProcessingMode: 'direct',
+  maxRedirects: 5,
+  maxHtmlBytes: 1500000,
+  maxImageBytes: 8000000,
+  requestTimeoutSeconds: 20,
   defaultOwner: 'nazarijshvetz1',
   defaultRepo: 'library-covers',
   rawPrefix: 'https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/',
@@ -92,6 +97,7 @@ function configureCoverAutomation() {
     {
       GITHUB_OWNER: COVER_AUTOMATION.defaultOwner,
       GITHUB_REPO: COVER_AUTOMATION.defaultRepo,
+      COVER_PROCESSING_MODE: COVER_AUTOMATION.defaultProcessingMode,
     },
     false
   );
@@ -215,7 +221,7 @@ function handleCoverConfirmation_(sheet, row, columns) {
 /**
  * Sends preview requests for selected existing material rows.
  * The visible source field wins; otherwise the current "Електронна версія"
- * URL is used as the publication-page source. At most ten rows are accepted.
+ * URL is used as the publication-page source. At most five rows are accepted.
  */
 function queueSelectedExistingCoverPreviews() {
   const sheet = getCoverSheet_();
@@ -258,7 +264,14 @@ function queueSelectedExistingCoverPreviews() {
     }
 
     prepareExistingCoverRow_(sheet, row, columns, catId, source);
-    if (submitCoverRequest(row, 'preview', false)) summary.submitted += 1;
+    if (submitCoverRequest(row, 'preview', false)) {
+      summary.submitted += 1;
+    } else {
+      summary.skipped += 1;
+      summary.messages.push(
+        catId + ': ' + String(sheet.getRange(row, columns['Статус обкладинки']).getDisplayValue())
+      );
+    }
   });
   showExistingCoverBatchSummary_('Пошук обкладинок', summary);
   return summary;
@@ -280,7 +293,14 @@ function commitSelectedExistingCovers() {
       summary.messages.push('Рядок ' + row + ': preview ще не готовий');
       return;
     }
-    if (submitCoverRequest(row, 'commit', false)) summary.submitted += 1;
+    if (submitCoverRequest(row, 'commit', false)) {
+      summary.submitted += 1;
+    } else {
+      summary.skipped += 1;
+      summary.messages.push(
+        catId + ': ' + String(sheet.getRange(row, columns['Статус обкладинки']).getDisplayValue())
+      );
+    }
   });
   showExistingCoverBatchSummary_('Збереження обкладинок', summary);
   return summary;
@@ -299,7 +319,7 @@ function getSelectedExistingMaterialRows_(sheet) {
   if (endRow < startRow) throw new Error('У виділенні немає рядків матеріалів');
   const count = endRow - startRow + 1;
   if (count > COVER_AUTOMATION.maxSelectedBatchSize) {
-    throw new Error('За один запуск можна обробити не більше 10 рядків');
+    throw new Error('За один запуск можна обробити не більше 5 рядків');
   }
   return Array.from({ length: count }, function (_, index) { return startRow + index; });
 }
@@ -332,7 +352,7 @@ function showExistingCoverBatchSummary_(title, summary) {
 }
 
 
-/** Submits a preview or commit request to GitHub Actions. */
+/** Processes a request directly or submits it to GitHub Actions in reserve mode. */
 function submitCoverRequest(row, mode, overwrite) {
   mode = mode || 'commit';
   overwrite = overwrite === true;
@@ -353,8 +373,10 @@ function submitCoverRequest(row, mode, overwrite) {
       return false;
     }
 
+    const processingMode = getCoverProcessingMode_();
     const activePhase = String(sheet.getRange(row, columns['Фаза обкладинки']).getDisplayValue());
-    if (activePhase === mode + '_requested') return false;
+    if (processingMode === 'actions' && activePhase === mode + '_requested') return false;
+    if (processingMode === 'direct' && activePhase === mode + '_processing') return false;
 
     const catId = resolveCatId(row);
     if (mode === 'commit' && !catId) {
@@ -367,9 +389,28 @@ function submitCoverRequest(row, mode, overwrite) {
 
     const requestId = Utilities.getUuid();
     sheet.getRange(row, columns['Request ID обкладинки']).setValue(requestId);
-    sheet.getRange(row, columns['Фаза обкладинки']).setValue(mode + '_requested');
+    sheet.getRange(row, columns['Фаза обкладинки']).setValue(
+      mode + (processingMode === 'direct' ? '_processing' : '_requested')
+    );
     sheet.getRange(row, columns['Оновлено обкладинку']).setValue(new Date());
-    setCoverStatus_(sheet, row, columns, COVER_AUTOMATION.statuses.submitted);
+    setCoverStatus_(
+      sheet,
+      row,
+      columns,
+      processingMode === 'direct'
+        ? COVER_AUTOMATION.statuses.processing
+        : COVER_AUTOMATION.statuses.submitted
+    );
+
+    if (processingMode === 'direct') {
+      return processCoverDirect_(sheet, row, columns, {
+        catId: catId || '',
+        sourceUrl: source,
+        requestId: requestId,
+        mode: mode,
+        overwrite: overwrite,
+      });
+    }
 
     dispatchCoverRequest_({
       cat_id: catId || '',
@@ -385,13 +426,215 @@ function submitCoverRequest(row, mode, overwrite) {
     const sheet = getCoverSheet_();
     const columns = findCoverColumns_(sheet);
     if (columns) {
-      setCoverStatus_(sheet, row, columns, COVER_AUTOMATION.statuses.uploadError);
+      setCoverStatus_(sheet, row, columns, mapDirectCoverError_(error));
       sheet.getRange(row, columns['Фаза обкладинки']).setValue('error');
+      sheet.getRange(row, columns['Підтвердити обкладинку']).setValue(false);
+      sheet.getRange(row, columns['Оновлено обкладинку']).setValue(new Date());
     }
+    if (getCoverProcessingMode_() === 'direct') return false;
     throw error;
   } finally {
     lock.releaseLock();
   }
+}
+
+
+/** Direct fallback that does not depend on GitHub Actions runners. */
+function processCoverDirect_(sheet, row, columns, request) {
+  const imageSourceUrl = request.mode === 'commit'
+    ? chooseExistingCoverSource_(
+      String(sheet.getRange(row, columns['Знайдене зображення']).getDisplayValue()).trim(),
+      request.sourceUrl
+    )
+    : resolveImageSourceDirect_(request.sourceUrl);
+
+  if (!imageSourceUrl) throw createCoverError_('image_not_found', 'Не знайдено зображення');
+
+  if (request.mode === 'preview') {
+    sheet.getRange(row, columns['Знайдене зображення']).setValue(imageSourceUrl);
+    sheet.getRange(row, columns['Фаза обкладинки']).setValue('preview_done');
+    sheet.getRange(row, columns['Підтвердити обкладинку']).setValue(false);
+    sheet.getRange(row, columns['Оновлено обкладинку']).setValue(new Date());
+    setCoverStatus_(sheet, row, columns, COVER_AUTOMATION.statuses.waitingConfirmation);
+    return true;
+  }
+
+  if (!isValidCatId_(request.catId)) {
+    throw createCoverError_('invalid_cat_id', 'Неправильний CAT-ID');
+  }
+  const jpegBlob = downloadImageAsJpegDirect_(imageSourceUrl, request.catId);
+  const upload = uploadCoverToGitHubDirect_(request.catId, jpegBlob, request.overwrite);
+  const finalUrl = COVER_AUTOMATION.rawPrefix + request.catId + '.jpg';
+
+  const inputHeaders = getHeaderMap_(sheet, COVER_AUTOMATION.headerRow);
+  const finalUrlColumn = inputHeaders['Обкладинка (URL)'];
+  if (!finalUrlColumn) throw new Error('Не знайдено колонку «Обкладинка (URL)»');
+  sheet.getRange(row, finalUrlColumn).setValue(finalUrl);
+  sheet.getRange(row, columns['Знайдене зображення']).setValue(imageSourceUrl);
+  applyFinalCoverToCatalog_(request.catId, finalUrl);
+  sheet.getRange(row, columns['Підтвердити обкладинку']).setValue(false);
+  sheet.getRange(row, columns['Фаза обкладинки']).setValue('done');
+  sheet.getRange(row, columns['Оновлено обкладинку']).setValue(new Date());
+  setCoverStatus_(
+    sheet,
+    row,
+    columns,
+    upload.alreadyExists
+      ? COVER_AUTOMATION.statuses.alreadyExists
+      : COVER_AUTOMATION.statuses.completed
+  );
+  return true;
+}
+
+
+function getCoverProcessingMode_() {
+  const value = String(
+    PropertiesService.getScriptProperties().getProperty('COVER_PROCESSING_MODE') ||
+    COVER_AUTOMATION.defaultProcessingMode
+  ).toLowerCase();
+  return value === 'actions' ? 'actions' : 'direct';
+}
+
+
+function resolveImageSourceDirect_(sourceUrl) {
+  const page = fetchDirectResource_(sourceUrl, COVER_AUTOMATION.maxImageBytes…2136 tokens truncated…  ) || [];
+  for (let jsonIndex = 0; jsonIndex < jsonLdBlocks.length; jsonIndex += 1) {
+    const jsonText = jsonLdBlocks[jsonIndex]
+      .replace(/^<script\b[^>]*>/i, '')
+      .replace(/<\/script>$/i, '')
+      .trim();
+    try {
+      const imageValue = findJsonLdImage_(JSON.parse(jsonText), 0);
+      const candidate = Array.isArray(imageValue) ? imageValue[0] : imageValue;
+      const resolved = resolveRelativeUrl_(candidate || '', baseUrl);
+      if (isSafePublicUrlCandidate_(resolved)) return resolved;
+    } catch (error) {
+      // Ignore malformed JSON-LD and continue to the next block.
+    }
+  }
+  return '';
+}
+
+
+function parseHtmlAttributes_(tag) {
+  const result = {};
+  const attributePattern = /([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+  let match;
+  while ((match = attributePattern.exec(String(tag || ''))) !== null) {
+    result[String(match[1]).toLowerCase()] = decodeHtmlEntities_(match[2] || match[3] || match[4] || '');
+  }
+  return result;
+}
+
+
+function findJsonLdImage_(value, depth) {
+  if (depth > 8 || value == null) return '';
+  if (typeof value === 'string') return '';
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const found = findJsonLdImage_(value[index], depth + 1);
+      if (found) return found;
+    }
+    return '';
+  }
+  if (typeof value !== 'object') return '';
+  const direct = value.image || value.thumbnailUrl;
+  if (typeof direct === 'string') return direct;
+  if (Array.isArray(direct) && direct.length) return direct;
+  if (direct && typeof direct === 'object' && typeof direct.url === 'string') return direct.url;
+  const keys = Object.keys(value);
+  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+    const found = findJsonLdImage_(value[keys[keyIndex]], depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+
+function decodeHtmlEntities_(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, function (_, code) { return String.fromCharCode(Number(code)); })
+    .replace(/&#x([0-9a-f]+);/gi, function (_, code) { return String.fromCharCode(parseInt(code, 16)); });
+}
+
+
+function resolveRelativeUrl_(value, baseUrl) {
+  const candidate = decodeHtmlEntities_(value).trim();
+  if (!candidate) return '';
+  if (/^https?:\/\//i.test(candidate)) return candidate;
+  const baseMatch = String(baseUrl || '').match(/^(https?):\/\/([^\/?#]+)(\/[^?#]*)?/i);
+  if (!baseMatch) return '';
+  const origin = baseMatch[1] + '://' + baseMatch[2];
+  if (/^\/\//.test(candidate)) return baseMatch[1] + ':' + candidate;
+  if (/^\//.test(candidate)) return origin + candidate;
+
+  const suffixMatch = candidate.match(/^([^?#]*)([?#][\s\S]*)?$/);
+  const relativePath = suffixMatch ? suffixMatch[1] : candidate;
+  const suffix = suffixMatch && suffixMatch[2] ? suffixMatch[2] : '';
+  const basePath = baseMatch[3] || '/';
+  const directory = /\/$/.test(basePath) ? basePath : basePath.replace(/\/[^\/]*$/, '/');
+  const parts = (directory + relativePath).split('/');
+  const normalized = [];
+  parts.forEach(function (part) {
+    if (!part || part === '.') return;
+    if (part === '..') normalized.pop();
+    else normalized.push(part);
+  });
+  return origin + '/' + normalized.join('/') + suffix;
+}
+
+
+function isSafePublicUrlCandidate_(value) {
+  const match = String(value || '').trim().match(/^(https?):\/\/([^\/?#]+)(?:[\/?#]|$)/i);
+  if (!match || match[2].indexOf('@') !== -1) return false;
+  let authority = match[2].toLowerCase();
+  let host;
+  if (authority[0] === '[') {
+    const bracketEnd = authority.indexOf(']');
+    if (bracketEnd === -1) return false;
+    host = authority.slice(1, bracketEnd);
+  } else {
+    host = authority.split(':')[0];
+  }
+  if (!host || host === 'localhost' || /\.(localhost|local)$/.test(host)) return false;
+  if (host === 'metadata.google.internal') return false;
+  if (host.indexOf(':') !== -1) {
+    const compact = host.replace(/^0+/, '');
+    if (compact === '' || compact === '::' || compact === '::1') return false;
+    if (/^(fc|fd)/i.test(compact) || /^fe[89ab]/i.test(compact)) return false;
+    if (/^::ffff:(127\.|10\.|192\.168\.|169\.254\.)/i.test(compact)) return false;
+    return true;
+  }
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return true;
+  const octets = host.split('.').map(Number);
+  if (octets.some(function (part) { return part < 0 || part > 255; })) return false;
+  const first = octets[0];
+  const second = octets[1];
+  if (first === 0 || first === 10 || first === 127 || first >= 224) return false;
+  if (first === 100 && second >= 64 && second <= 127) return false;
+  if (first === 169 && second === 254) return false;
+  if (first === 172 && second >= 16 && second <= 31) return false;
+  if (first === 192 && second === 168) return false;
+  if (first === 198 && (second === 18 || second === 19)) return false;
+  return true;
+}
+
+
+function createCoverError_(status, message) {
+  const error = new Error(message || status);
+  error.coverStatus = status;
+  return error;
+}
+
+
+function mapDirectCoverError_(error) {
+  const status = error && error.coverStatus ? error.coverStatus : 'upload_error';
+  return mapCoverErrorStatus_(status);
 }
 
 
