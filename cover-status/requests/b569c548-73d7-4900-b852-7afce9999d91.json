@@ -1,0 +1,11 @@
+{
+  "cat_id": "CAT-0925",
+  "request_id": "b569c548-73d7-4900-b852-7afce9999d91",
+  "success": false,
+  "status": "url_unavailable",
+  "message": "Посилання повернуло HTTP 403",
+  "source_url": "https://petrovka-online.com/ru/level_2_fox_dog_cd_rom_mitchell_h_isbn_9789604430086",
+  "updated_at": "2026-08-06T17:15:25.595382Z",
+  "mode": "preview",
+  "dry_run": false
+}
