@@ -82,7 +82,6 @@ function setupCoverAutomation() {
 
   configureCoverAutomation();
   installCoverAutomationTriggers();
-  addCoverAutomationMenu_();
   return columns;
 }
 
