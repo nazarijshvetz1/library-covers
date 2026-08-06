@@ -1,0 +1,132 @@
+name: Import library cover
+
+on:
+  repository_dispatch:
+    types:
+      - cover_ingest
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview the cover or commit it to covers/
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - commit
+      cat_id:
+        description: CAT-ID (required for commit)
+        required: false
+        type: string
+      source_url:
+        description: Direct image URL or publication page URL
+        required: true
+        type: string
+      request_id:
+        description: Unique UUID for this request
+        required: true
+        type: string
+      overwrite:
+        description: Replace an existing cover
+        required: true
+        default: false
+        type: boolean
+      dry_run:
+        description: Validate and convert without writing covers/
+        required: true
+        default: true
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/import-cover.yml'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'apps-script/**'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --requirement scripts/requirements.txt
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Run Apps Script pure-logic tests
+        run: node tests/test_apps_script_logic.mjs
+
+  ingest:
+    if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: library-cover-repository-writes
+      queue: max
+    env:
+      CAT_ID: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.cat_id || inputs.cat_id }}
+      SOURCE_URL: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_url || inputs.source_url }}
+      REQUEST_ID: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.request_id || inputs.request_id }}
+      MODE: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.mode || inputs.mode }}
+      OVERWRITE: ${{ github.event_name == 'repository_dispatch' && toJSON(github.event.client_payload.overwrite) || inputs.overwrite }}
+      DRY_RUN: ${{ github.event_name == 'repository_dispatch' && toJSON(github.event.client_payload.dry_run) || inputs.dry_run }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --requirement scripts/requirements.txt
+
+      - name: Import or preview cover
+        id: import_cover
+        continue-on-error: true
+        run: |
+          python scripts/import_cover.py \
+            --cat-id "$CAT_ID" \
+            --source-url "$SOURCE_URL" \
+            --request-id "$REQUEST_ID" \
+            --mode "$MODE" \
+            --overwrite "$OVERWRITE" \
+            --dry-run "$DRY_RUN" \
+            --repo-root .
+
+      - name: Commit cover and status result
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add covers
+          if test -d cover-status; then git add cover-status; fi
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Process library cover request"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Report processing failure after status is saved
+        if: steps.import_cover.outcome == 'failure'
+        run: exit 1
