@@ -497,7 +497,208 @@ function getCoverProcessingMode_() {
 
 
 function resolveImageSourceDirect_(sourceUrl) {
-  const page = fetchDirectResource_(sourceUrl, COVER_AUTOMATION.maxImageBytes…2136 tokens truncated…  ) || [];
+  const page = fetchDirectResource_(sourceUrl, COVER_AUTOMATION.maxImageBytes, [
+    'text/html,application/xhtml+xml,image/jpeg,image/png,image/gif,image/bmp,image/webp;q=0.9,*/*;q=0.5',
+  ].join(''));
+  if (/^image\//.test(page.contentType)) return page.url;
+  if (page.contentType !== 'text/html' && page.contentType !== 'application/xhtml+xml') {
+    throw createCoverError_('unsupported_format', 'Посилання не повернуло HTML або зображення');
+  }
+  if (page.bytes.length > COVER_AUTOMATION.maxHtmlBytes) {
+    throw createCoverError_('url_unavailable', 'HTML-сторінка завелика');
+  }
+
+  const html = Utilities.newBlob(page.bytes, page.contentType).getDataAsString('UTF-8');
+  const candidate = extractImageUrlFromHtml_(html, page.url);
+  if (!candidate) throw createCoverError_('image_not_found', 'На сторінці немає обкладинки');
+  const image = fetchDirectResource_(candidate, COVER_AUTOMATION.maxImageBytes, [
+    'image/jpeg,image/png,image/gif,image/bmp,image/webp;q=0.9,*/*;q=0.2',
+  ].join(''));
+  if (!/^image\//.test(image.contentType)) {
+    throw createCoverError_('image_not_found', 'Знайдене посилання не є зображенням');
+  }
+  return image.url;
+}
+
+
+function downloadImageAsJpegDirect_(imageUrl, catId) {
+  const image = fetchDirectResource_(imageUrl, COVER_AUTOMATION.maxImageBytes, [
+    'image/jpeg,image/png,image/gif,image/bmp;q=0.9,*/*;q=0.2',
+  ].join(''));
+  let contentType = image.contentType;
+  if (!/^(image\/jpeg|image\/png|image\/gif|image\/bmp)$/.test(contentType)) {
+    const extension = String(image.url).toLowerCase().match(/\.(jpe?g|png|gif|bmp)(?:[?#]|$)/);
+    const mimeByExtension = {
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      gif: 'image/gif',
+      bmp: 'image/bmp',
+    };
+    contentType = extension ? mimeByExtension[extension[1]] : '';
+  }
+  if (!contentType) {
+    throw createCoverError_('unsupported_format', 'Apps Script не конвертує цей формат у JPEG');
+  }
+
+  try {
+    const converted = Utilities
+      .newBlob(image.bytes, contentType, catId + '.source')
+      .getAs('image/jpeg')
+      .setName(catId + '.jpg');
+    const convertedBytes = converted.getBytes();
+    if (!convertedBytes.length || convertedBytes.length > COVER_AUTOMATION.maxImageBytes) {
+      throw createCoverError_('file_too_large', 'Конвертований JPEG завеликий');
+    }
+    return Utilities.newBlob(convertedBytes, 'image/jpeg', catId + '.jpg');
+  } catch (error) {
+    if (error && error.coverStatus) throw error;
+    throw createCoverError_('unsupported_format', 'Не вдалося конвертувати файл у JPEG');
+  }
+}
+
+
+function uploadCoverToGitHubDirect_(catId, jpegBlob, overwrite) {
+  if (!isValidCatId_(catId)) throw createCoverError_('invalid_cat_id', 'Неправильний CAT-ID');
+  const config = getGitHubConfig_();
+  const path = 'covers/' + catId + '.jpg';
+  const apiUrl = 'https://api.github.com/repos/' +
+    encodeURIComponent(config.owner) + '/' +
+    encodeURIComponent(config.repo) + '/contents/' + path;
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: 'Bearer ' + config.token,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'library-cover-google-apps-script',
+  };
+  const existingResponse = UrlFetchApp.fetch(apiUrl + '?ref=main', {
+    method: 'get',
+    headers: headers,
+    muteHttpExceptions: true,
+    followRedirects: false,
+    timeoutSeconds: COVER_AUTOMATION.requestTimeoutSeconds,
+  });
+  const existingCode = existingResponse.getResponseCode();
+  let existingSha = '';
+  if (existingCode === 200) {
+    if (!overwrite) return { alreadyExists: true };
+    existingSha = String(JSON.parse(existingResponse.getContentText()).sha || '');
+  } else if (existingCode !== 404) {
+    throw createCoverError_('upload_error', 'GitHub не перевірив наявний файл. HTTP ' + existingCode);
+  }
+
+  const payload = {
+    message: (existingSha ? 'Replace ' : 'Add ') + 'cover ' + catId,
+    content: Utilities.base64Encode(jpegBlob.getBytes()),
+    branch: 'main',
+  };
+  if (existingSha) payload.sha = existingSha;
+  const response = UrlFetchApp.fetch(apiUrl, {
+    method: 'put',
+    contentType: 'application/json',
+    headers: headers,
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+    followRedirects: false,
+    timeoutSeconds: COVER_AUTOMATION.requestTimeoutSeconds,
+  });
+  const code = response.getResponseCode();
+  if (code !== 200 && code !== 201) {
+    throw createCoverError_('upload_error', 'GitHub не зберіг обкладинку. HTTP ' + code);
+  }
+  return { alreadyExists: false };
+}
+
+
+function fetchDirectResource_(sourceUrl, maxBytes, acceptHeader) {
+  let currentUrl = String(sourceUrl || '').trim();
+  for (let redirect = 0; redirect <= COVER_AUTOMATION.maxRedirects; redirect += 1) {
+    if (!isSafePublicUrlCandidate_(currentUrl)) {
+      throw createCoverError_('unsafe_url', 'Небезпечне або локальне посилання');
+    }
+    const response = UrlFetchApp.fetch(currentUrl, {
+      method: 'get',
+      headers: {
+        Accept: acceptHeader,
+        'User-Agent': 'Mozilla/5.0 (compatible; LibraryCoverBot/1.0)',
+      },
+      muteHttpExceptions: true,
+      followRedirects: false,
+      validateHttpsCertificates: true,
+      timeoutSeconds: COVER_AUTOMATION.requestTimeoutSeconds,
+    });
+    const code = response.getResponseCode();
+    if ([301, 302, 303, 307, 308].indexOf(code) !== -1) {
+      const location = getHeaderValue_(response.getAllHeaders(), 'location');
+      if (!location) throw createCoverError_('url_unavailable', 'Redirect без Location');
+      currentUrl = resolveRelativeUrl_(location, currentUrl);
+      continue;
+    }
+    if (code < 200 || code >= 300) {
+      throw createCoverError_('url_unavailable', 'Посилання повернуло HTTP ' + code);
+    }
+    const contentLength = Number(getHeaderValue_(response.getAllHeaders(), 'content-length') || 0);
+    if (contentLength && contentLength > maxBytes) {
+      throw createCoverError_('file_too_large', 'Файл перевищує дозволений розмір');
+    }
+    const bytes = response.getBlob().getBytes();
+    if (!bytes.length || bytes.length > maxBytes) {
+      throw createCoverError_('file_too_large', 'Файл перевищує дозволений розмір');
+    }
+    const contentType = String(
+      getHeaderValue_(response.getAllHeaders(), 'content-type') ||
+      response.getBlob().getContentType() || ''
+    ).toLowerCase().split(';')[0].trim();
+    return { url: currentUrl, contentType: contentType, bytes: bytes };
+  }
+  throw createCoverError_('too_many_redirects', 'Забагато перенаправлень');
+}
+
+
+function getHeaderValue_(headers, name) {
+  const expected = String(name || '').toLowerCase();
+  const keys = Object.keys(headers || {});
+  for (let index = 0; index < keys.length; index += 1) {
+    if (keys[index].toLowerCase() === expected) {
+      const value = headers[keys[index]];
+      return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+    }
+  }
+  return '';
+}
+
+
+function extractImageUrlFromHtml_(html, baseUrl) {
+  const metaTags = String(html || '').match(/<meta\b[^>]*>/gi) || [];
+  const preferredKeys = [
+    'og:image:secure_url',
+    'og:image',
+    'twitter:image:src',
+    'twitter:image',
+  ];
+  for (let keyIndex = 0; keyIndex < preferredKeys.length; keyIndex += 1) {
+    for (let tagIndex = 0; tagIndex < metaTags.length; tagIndex += 1) {
+      const attributes = parseHtmlAttributes_(metaTags[tagIndex]);
+      const key = String(attributes.property || attributes.name || '').toLowerCase();
+      if (key === preferredKeys[keyIndex] && attributes.content) {
+        const resolved = resolveRelativeUrl_(attributes.content, baseUrl);
+        if (isSafePublicUrlCandidate_(resolved)) return resolved;
+      }
+    }
+  }
+
+  const linkTags = String(html || '').match(/<link\b[^>]*>/gi) || [];
+  for (let linkIndex = 0; linkIndex < linkTags.length; linkIndex += 1) {
+    const attributes = parseHtmlAttributes_(linkTags[linkIndex]);
+    if (String(attributes.rel || '').toLowerCase().split(/\s+/).indexOf('image_src') !== -1) {
+      const resolved = resolveRelativeUrl_(attributes.href || '', baseUrl);
+      if (isSafePublicUrlCandidate_(resolved)) return resolved;
+    }
+  }
+
+  const jsonLdBlocks = String(html || '').match(
+    /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi
+  ) || [];
   for (let jsonIndex = 0; jsonIndex < jsonLdBlocks.length; jsonIndex += 1) {
     const jsonText = jsonLdBlocks[jsonIndex]
       .replace(/^<script\b[^>]*>/i, '')

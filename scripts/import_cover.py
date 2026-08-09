@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -32,10 +33,13 @@ MAX_HTML_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_SIZE = (600, 900)
-USER_AGENT = "LibraryCoverImporter/1.0 (+https://github.com/nazarijshvetz1/library-covers)"
+USER_AGENT = (
+    "LibraryCoverImporter/1.0 (+https://github.com/nazarijshvetz1/library-covers)"
+)
+REQUEST_FINGERPRINT_VERSION = 1
+MAX_STATUS_BYTES = 128 * 1024
 RAW_BASE_URL = (
-    "https://raw.githubusercontent.com/"
-    "nazarijshvetz1/library-covers/main/covers"
+    "https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers"
 )
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
@@ -70,6 +74,54 @@ def parse_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def normalize_request_parameters(
+    *,
+    cat_id: str,
+    source_url: str,
+    mode: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Return the canonical behavior-affecting fields for one request."""
+
+    return {
+        "cat_id": str(cat_id or "").strip().upper(),
+        "source_url": str(source_url or "").strip(),
+        "mode": str(mode or "").strip(),
+        "overwrite": bool(overwrite),
+        "dry_run": bool(dry_run),
+    }
+
+
+def request_fingerprint(
+    *,
+    cat_id: str,
+    source_url: str,
+    mode: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> str:
+    """Create a stable fingerprint for request-id idempotency checks."""
+
+    parameters = normalize_request_parameters(
+        cat_id=cat_id,
+        source_url=source_url,
+        mode=mode,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+    canonical = json.dumps(
+        {
+            "version": REQUEST_FINGERPRINT_VERSION,
+            **parameters,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def validate_cat_id(cat_id: str, *, required: bool) -> str:
     cat_id = (cat_id or "").strip().upper()
     if not cat_id and not required:
@@ -94,7 +146,9 @@ def _iter_resolved_ips(
     try:
         records = resolver(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise CoverError("url_unavailable", "Не вдалося визначити адресу сайту") from exc
+        raise CoverError(
+            "url_unavailable", "Не вдалося визначити адресу сайту"
+        ) from exc
 
     addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for record in records:
@@ -102,7 +156,9 @@ def _iter_resolved_ips(
         try:
             address = ipaddress.ip_address(raw.split("%", 1)[0])
         except ValueError as exc:
-            raise CoverError("unsafe_url", "Сайт повернув некоректну IP-адресу") from exc
+            raise CoverError(
+                "unsafe_url", "Сайт повернув некоректну IP-адресу"
+            ) from exc
         addresses.append(address)
     if not addresses:
         raise CoverError("url_unavailable", "Для сайту не знайдено IP-адресу")
@@ -126,7 +182,9 @@ def validate_public_url(
     if not parsed.hostname:
         raise CoverError("invalid_url", "У посиланні відсутня адреса сайту")
     if parsed.username or parsed.password:
-        raise CoverError("unsafe_url", "Посилання з логіном або паролем не підтримуються")
+        raise CoverError(
+            "unsafe_url", "Посилання з логіном або паролем не підтримуються"
+        )
 
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname == "localhost" or hostname.endswith(".localhost"):
@@ -142,7 +200,9 @@ def validate_public_url(
         addresses = _iter_resolved_ips(hostname, effective_port, resolver)
 
     if any(not address.is_global for address in addresses):
-        raise CoverError("unsafe_url", "Приватні, локальні та службові адреси заборонені")
+        raise CoverError(
+            "unsafe_url", "Приватні, локальні та службові адреси заборонені"
+        )
     return url
 
 
@@ -219,7 +279,9 @@ def fetch_resource(
                 elif content_type in {"text/html", "application/xhtml+xml", ""}:
                     limit = MAX_HTML_BYTES
                 else:
-                    raise CoverError("unsupported_format", "Непідтримуваний формат відповіді")
+                    raise CoverError(
+                        "unsupported_format", "Непідтримуваний формат відповіді"
+                    )
                 body = _read_limited(response, limit)
                 return FetchedResource(response.url or current_url, content_type, body)
     finally:
@@ -290,12 +352,16 @@ def find_cover(
     if source.content_type.startswith("image/"):
         return source.url, source.body
     if source.content_type not in {"text/html", "application/xhtml+xml", ""}:
-        raise CoverError("unsupported_format", "Посилання не містить HTML або зображення")
+        raise CoverError(
+            "unsupported_format", "Посилання не містить HTML або зображення"
+        )
 
     image_url = discover_image_url(source.url, source.body)
     image = fetcher(image_url)
     if not image.content_type.startswith("image/"):
-        raise CoverError("unsupported_format", "Знайдене посилання не повернуло зображення")
+        raise CoverError(
+            "unsupported_format", "Знайдене посилання не повернуло зображення"
+        )
     return image.url, image.body
 
 
@@ -308,7 +374,9 @@ def convert_to_jpeg(image_bytes: bytes) -> bytes:
             with Image.open(BytesIO(image_bytes)) as source:
                 image = ImageOps.exif_transpose(source)
                 if image.width * image.height > MAX_IMAGE_PIXELS:
-                    raise CoverError("file_too_large", "Зображення має надто багато пікселів")
+                    raise CoverError(
+                        "file_too_large", "Зображення має надто багато пікселів"
+                    )
                 if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
                     rgba = image.convert("RGBA")
                     background = Image.new("RGB", rgba.size, "white")
@@ -328,8 +396,15 @@ def convert_to_jpeg(image_bytes: bytes) -> bytes:
                 return output.getvalue()
     except CoverError:
         raise
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise CoverError("unsupported_format", "Файл не є підтримуваним зображенням") from exc
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+        Image.DecompressionBombError,
+    ) as exc:
+        raise CoverError(
+            "unsupported_format", "Файл не є підтримуваним зображенням"
+        ) from exc
 
 
 def final_url_for(cat_id: str) -> str:
@@ -349,9 +424,86 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     _atomic_write_bytes(path, content)
 
 
+def _request_status_path(repo_root: Path, request_id: str) -> Path:
+    return repo_root / "cover-status" / "requests" / f"{request_id}.json"
+
+
+def read_existing_request_status(
+    repo_root: Path,
+    *,
+    request_id: str,
+    cat_id: str,
+    source_url: str,
+    mode: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Return an exact prior result or reject reuse of its request_id."""
+
+    request_path = _request_status_path(repo_root, request_id)
+    if not request_path.exists() and not request_path.is_symlink():
+        return None
+
+    conflict = CoverError(
+        "request_id_conflict",
+        "Цей request_id уже використано для іншого запиту",
+    )
+    try:
+        if request_path.is_symlink() or not request_path.is_file():
+            raise conflict
+        size = request_path.stat().st_size
+        if size <= 0 or size > MAX_STATUS_BYTES:
+            raise conflict
+        stored = json.loads(request_path.read_text("utf-8"))
+    except CoverError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise conflict from exc
+
+    if not isinstance(stored, dict):
+        raise conflict
+    if stored.get("request_id") != request_id:
+        raise conflict
+    if not isinstance(stored.get("success"), bool):
+        raise conflict
+    if not isinstance(stored.get("status"), str):
+        raise conflict
+    if stored.get("fingerprint_version") != REQUEST_FINGERPRINT_VERSION:
+        raise conflict
+    if not isinstance(stored.get("overwrite"), bool):
+        raise conflict
+    if not isinstance(stored.get("dry_run"), bool):
+        raise conflict
+    if not all(
+        isinstance(stored.get(field), str)
+        for field in ("cat_id", "source_url", "mode", "request_fingerprint")
+    ):
+        raise conflict
+
+    stored_fingerprint = request_fingerprint(
+        cat_id=stored["cat_id"],
+        source_url=stored["source_url"],
+        mode=stored["mode"],
+        overwrite=stored["overwrite"],
+        dry_run=stored["dry_run"],
+    )
+    expected_fingerprint = request_fingerprint(
+        cat_id=cat_id,
+        source_url=source_url,
+        mode=mode,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+    if stored["request_fingerprint"] != stored_fingerprint:
+        raise conflict
+    if stored_fingerprint != expected_fingerprint:
+        raise conflict
+    return stored
+
+
 def write_status_files(repo_root: Path, payload: dict[str, Any], mode: str) -> None:
     request_id = validate_request_id(payload["request_id"])
-    request_path = repo_root / "cover-status" / "requests" / f"{request_id}.json"
+    request_path = _request_status_path(repo_root, request_id)
     _atomic_write_json(request_path, payload)
     cat_id = payload.get("cat_id") or ""
     if mode == "commit" and CAT_ID_RE.fullmatch(cat_id):
@@ -369,18 +521,29 @@ def build_status(
     image_source_url: str = "",
     final_url: str = "",
     mode: str,
+    overwrite: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
+    parameters = normalize_request_parameters(
+        cat_id=cat_id,
+        source_url=source_url,
+        mode=mode,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
     payload: dict[str, Any] = {
-        "cat_id": cat_id,
+        "cat_id": parameters["cat_id"],
         "request_id": request_id,
         "success": success,
         "status": status,
         "message": message,
-        "source_url": source_url,
+        "source_url": parameters["source_url"],
         "updated_at": utc_now(),
-        "mode": mode,
-        "dry_run": dry_run,
+        "mode": parameters["mode"],
+        "overwrite": parameters["overwrite"],
+        "dry_run": parameters["dry_run"],
+        "fingerprint_version": REQUEST_FINGERPRINT_VERSION,
+        "request_fingerprint": request_fingerprint(**parameters),
     }
     if image_source_url:
         payload["image_source_url"] = image_source_url
@@ -420,6 +583,7 @@ def process_request(
             message="Обкладинку знайдено — перевірте та підтвердьте",
             image_source_url=image_source_url,
             mode=mode,
+            overwrite=overwrite,
             dry_run=dry_run,
         )
 
@@ -435,6 +599,7 @@ def process_request(
             image_source_url=image_source_url,
             final_url=final_url,
             mode=mode,
+            overwrite=overwrite,
             dry_run=dry_run,
         )
 
@@ -450,6 +615,7 @@ def process_request(
         image_source_url=image_source_url,
         final_url=final_url,
         mode=mode,
+        overwrite=overwrite,
         dry_run=dry_run,
     )
 
@@ -466,31 +632,55 @@ def run_and_record(
     fetcher: Fetcher = fetch_resource,
 ) -> dict[str, Any]:
     safe_request_id = validate_request_id(request_id)
-    safe_cat_id = ""
+    parameters = normalize_request_parameters(
+        cat_id=cat_id,
+        source_url=source_url,
+        mode=mode,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
     try:
-        safe_cat_id = validate_cat_id(cat_id, required=False)
+        existing = read_existing_request_status(
+            repo_root,
+            request_id=safe_request_id,
+            **parameters,
+        )
+    except CoverError as exc:
+        return build_status(
+            request_id=safe_request_id,
+            success=False,
+            status=exc.status,
+            message=exc.message,
+            **parameters,
+        )
+    if existing is not None:
+        return existing
+
+    safe_cat_id = parameters["cat_id"]
+    try:
         payload = process_request(
             repo_root=repo_root,
             cat_id=safe_cat_id,
-            source_url=source_url,
+            source_url=parameters["source_url"],
             request_id=safe_request_id,
-            mode=mode,
-            overwrite=overwrite,
-            dry_run=dry_run,
+            mode=parameters["mode"],
+            overwrite=parameters["overwrite"],
+            dry_run=parameters["dry_run"],
             fetcher=fetcher,
         )
     except CoverError as exc:
         payload = build_status(
             cat_id=safe_cat_id,
             request_id=safe_request_id,
-            source_url=source_url,
+            source_url=parameters["source_url"],
             success=False,
             status=exc.status,
             message=exc.message,
-            mode=mode,
-            dry_run=dry_run,
+            mode=parameters["mode"],
+            overwrite=parameters["overwrite"],
+            dry_run=parameters["dry_run"],
         )
-    write_status_files(repo_root, payload, mode)
+    write_status_files(repo_root, payload, parameters["mode"])
     return payload
 
 
@@ -519,7 +709,9 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=parse_bool(args.dry_run),
         )
     except CoverError as exc:
-        print(json.dumps({"success": False, "status": exc.status, "message": exc.message}))
+        print(
+            json.dumps({"success": False, "status": exc.status, "message": exc.message})
+        )
         return 2
     print(json.dumps(payload, ensure_ascii=False))
     return 0 if payload.get("success") else 2

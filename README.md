@@ -38,6 +38,13 @@ https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-
 Старі workflow `unpack-covers.yml`, `import-base64-cover.yml` та
 `optimize-covers.yml` залишаються незалежними й не змінюються.
 
+Кожний `request_id` є одноразовим ключем запиту. Status JSON містить
+`request_fingerprint`, побудований із CAT-ID, URL, режиму, дозволу на заміну та
+ознаки dry run. Точний повтор повертає вже збережений результат без повторного
+завантаження. Якщо той самий `request_id` повторно надіслано з іншими
+параметрами, обробник повертає `request_id_conflict` і не змінює попередній
+status або обкладинку.
+
 ## Розробка і тести
 
 ```bash
