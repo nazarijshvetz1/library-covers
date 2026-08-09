@@ -117,7 +117,9 @@ def test_json_ld_image_is_supported():
     assert cover.discover_image_url(page, html) == f"{PUBLIC}/j.jpg"
 
 
-@pytest.mark.parametrize("url", ["not-a-url", "file:///tmp/book.jpg", "ftp://example.com/x"])
+@pytest.mark.parametrize(
+    "url", ["not-a-url", "file:///tmp/book.jpg", "ftp://example.com/x"]
+)
 def test_invalid_url(url):
     with pytest.raises(cover.CoverError) as error:
         cover.validate_public_url(url)
@@ -272,8 +274,12 @@ def test_success_status_json_is_created(tmp_path):
         dry_run=False,
         fetcher=fake_fetcher({url: resource(url, "image/jpeg", image_bytes())}),
     )
-    saved = json.loads((tmp_path / "cover-status" / "requests" / f"{rid}.json").read_text("utf-8"))
-    latest = json.loads((tmp_path / "cover-status" / "CAT-9001.json").read_text("utf-8"))
+    saved = json.loads(
+        (tmp_path / "cover-status" / "requests" / f"{rid}.json").read_text("utf-8")
+    )
+    latest = json.loads(
+        (tmp_path / "cover-status" / "CAT-9001.json").read_text("utf-8")
+    )
     assert saved == result == latest
 
 
@@ -290,7 +296,9 @@ def test_error_status_json_is_created(tmp_path):
         dry_run=False,
         fetcher=fake_fetcher({url: resource(url, "text/html", b"<html></html>")}),
     )
-    saved = json.loads((tmp_path / "cover-status" / "requests" / f"{rid}.json").read_text("utf-8"))
+    saved = json.loads(
+        (tmp_path / "cover-status" / "requests" / f"{rid}.json").read_text("utf-8")
+    )
     assert result["success"] is False
     assert saved["status"] == "image_not_found"
 
@@ -317,4 +325,166 @@ def test_dry_run_does_not_replace_cover(tmp_path):
         dry_run=True,
     )
     assert result["status"] == "dry_run_completed"
+    assert not (tmp_path / "covers" / "CAT-9001.jpg").exists()
+
+
+def test_exact_request_id_retry_returns_stored_result_without_fetching(tmp_path):
+    rid = request_id()
+    url = f"{PUBLIC}/cover.jpg"
+    first = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id="CAT-9001",
+        source_url=url,
+        request_id=rid,
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=fake_fetcher({url: resource(url, "image/jpeg", image_bytes())}),
+    )
+    request_path = tmp_path / "cover-status" / "requests" / f"{rid}.json"
+    latest_path = tmp_path / "cover-status" / "CAT-9001.json"
+    original_request = request_path.read_bytes()
+    original_latest = latest_path.read_bytes()
+
+    def must_not_fetch(_url):
+        raise AssertionError("an idempotent retry must not fetch or convert again")
+
+    retried = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id=" cat-9001 ",
+        source_url=f" {url} ",
+        request_id=rid.upper(),
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=must_not_fetch,
+    )
+
+    assert retried == first
+    assert len(first["request_fingerprint"]) == 64
+    assert first["fingerprint_version"] == cover.REQUEST_FINGERPRINT_VERSION
+    assert first["overwrite"] is False
+    assert request_path.read_bytes() == original_request
+    assert latest_path.read_bytes() == original_latest
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"cat_id": "CAT-9002"},
+        {"source_url": f"{PUBLIC}/other.jpg"},
+        {"mode": "preview"},
+        {"overwrite": True},
+        {"dry_run": True},
+    ],
+)
+def test_request_id_parameter_mismatch_returns_conflict_without_overwriting_status(
+    tmp_path,
+    changed,
+):
+    rid = request_id()
+    url = f"{PUBLIC}/cover.jpg"
+    original = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id="CAT-9001",
+        source_url=url,
+        request_id=rid,
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=fake_fetcher({url: resource(url, "image/jpeg", image_bytes())}),
+    )
+    request_path = tmp_path / "cover-status" / "requests" / f"{rid}.json"
+    latest_path = tmp_path / "cover-status" / "CAT-9001.json"
+    original_request = request_path.read_bytes()
+    original_latest = latest_path.read_bytes()
+    original_cover = (tmp_path / "covers" / "CAT-9001.jpg").read_bytes()
+    retry = {
+        "repo_root": tmp_path,
+        "cat_id": "CAT-9001",
+        "source_url": url,
+        "request_id": rid,
+        "mode": "commit",
+        "overwrite": False,
+        "dry_run": False,
+        "fetcher": lambda _url: (_ for _ in ()).throw(
+            AssertionError("a conflicting request must not be processed")
+        ),
+    }
+    retry.update(changed)
+
+    conflict = cover.run_and_record(**retry)
+
+    assert original["success"] is True
+    assert conflict["success"] is False
+    assert conflict["status"] == "request_id_conflict"
+    assert request_path.read_bytes() == original_request
+    assert latest_path.read_bytes() == original_latest
+    assert (tmp_path / "covers" / "CAT-9001.jpg").read_bytes() == original_cover
+    assert not (tmp_path / "cover-status" / "CAT-9002.json").exists()
+    assert not (tmp_path / "covers" / "CAT-9002.jpg").exists()
+
+
+def test_failed_request_is_idempotent_and_not_reprocessed(tmp_path):
+    rid = request_id()
+    url = f"{PUBLIC}/plain"
+    first = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id="CAT-9001",
+        source_url=url,
+        request_id=rid,
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=fake_fetcher({url: resource(url, "text/html", b"<html></html>")}),
+    )
+
+    retried = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id="CAT-9001",
+        source_url=url,
+        request_id=rid,
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=lambda _url: (_ for _ in ()).throw(
+            AssertionError("a stored failure must not be processed again")
+        ),
+    )
+
+    assert first["status"] == "image_not_found"
+    assert retried == first
+
+
+def test_unfingerprinted_existing_status_is_conflict_and_is_never_replaced(tmp_path):
+    rid = request_id()
+    request_path = tmp_path / "cover-status" / "requests" / f"{rid}.json"
+    request_path.parent.mkdir(parents=True)
+    legacy = {
+        "cat_id": "CAT-9001",
+        "request_id": rid,
+        "source_url": f"{PUBLIC}/cover.jpg",
+        "success": True,
+        "status": "completed",
+        "mode": "commit",
+        "dry_run": False,
+    }
+    request_path.write_text(json.dumps(legacy), "utf-8")
+    original = request_path.read_bytes()
+
+    conflict = cover.run_and_record(
+        repo_root=tmp_path,
+        cat_id="CAT-9001",
+        source_url=f"{PUBLIC}/cover.jpg",
+        request_id=rid,
+        mode="commit",
+        overwrite=False,
+        dry_run=False,
+        fetcher=lambda _url: (_ for _ in ()).throw(
+            AssertionError("an ambiguous old status must not be reprocessed")
+        ),
+    )
+
+    assert conflict["status"] == "request_id_conflict"
+    assert request_path.read_bytes() == original
     assert not (tmp_path / "covers" / "CAT-9001.jpg").exists()
