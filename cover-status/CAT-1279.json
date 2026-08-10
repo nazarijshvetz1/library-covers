@@ -1,0 +1,16 @@
+{
+  "cat_id": "CAT-1279",
+  "request_id": "15fb4398-f18d-408f-aef0-09fd6aa39691",
+  "success": true,
+  "status": "completed",
+  "message": "Обкладинку додано",
+  "source_url": "https://covers.openlibrary.org/b/id/13750029-L.jpg",
+  "updated_at": "2026-08-10T21:36:40.903225Z",
+  "mode": "commit",
+  "overwrite": false,
+  "dry_run": false,
+  "fingerprint_version": 1,
+  "request_fingerprint": "e0ed4ee4fa4ba440632d3b0eddcbfa82be82d4867d2149e1554df6f01c173146",
+  "image_source_url": "https://ia801909.us.archive.org/view_archive.php?archive=/31/items/l_covers_0013/l_covers_0013_75.zip&file=0013750029-L.jpg",
+  "final_url": "https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-1279.jpg"
+}
