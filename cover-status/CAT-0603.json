@@ -1,0 +1,16 @@
+{
+  "cat_id": "CAT-0603",
+  "request_id": "5b102e2a-c0f2-400d-bc54-b17331c61086",
+  "success": true,
+  "status": "completed",
+  "message": "Обкладинку додано",
+  "source_url": "https://pidruchnyk.com.ua/3212-pidpryiemnyctvo-9-klas-gurgula-2026.html",
+  "updated_at": "2026-08-11T14:38:24.094329Z",
+  "mode": "commit",
+  "overwrite": true,
+  "dry_run": false,
+  "fingerprint_version": 1,
+  "request_fingerprint": "db30058b68e01f663572be6e886d7b422e39f0fe0cc22e2cdfef3e5fae6817e9",
+  "image_source_url": "https://pidruchnyk.com.ua/uploads/posts/2026-06/pidpryiemnyctvo-i-finansova-gramotnist-9-klas-gurgula-2026.jpg",
+  "final_url": "https://raw.githubusercontent.com/nazarijshvetz1/library-covers/main/covers/CAT-0603.jpg"
+}
